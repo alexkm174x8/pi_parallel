@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -33,6 +34,7 @@ from gui.about_dialog import AboutDialog
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs"
+DEFAULT_MACHINEFILE = Path("/shared/proyecto/hosts")
 MAX_IMAGES = 10
 FILTER_LABELS = {
     "vg": "Inversion vertical gris",
@@ -241,6 +243,23 @@ class MainWindow(QMainWindow):
         kernel_layout.addRow("Kernel gris:", self.kernel_gray_spin)
         kernel_layout.addRow("Kernel color:", self.kernel_color_spin)
 
+        mpi_group = QGroupBox("Ejecucion MPI")
+        mpi_layout = QFormLayout(mpi_group)
+        self.use_mpi_checkbox = QCheckBox("Usar cluster MPI")
+        self.use_mpi_checkbox.setChecked(True)
+        self.mpi_processes_spin = QSpinBox()
+        self.mpi_processes_spin.setRange(1, 128)
+        self.mpi_processes_spin.setValue(6)
+        self.mpi_hostfile_edit = QLineEdit(str(DEFAULT_MACHINEFILE))
+        self.mpi_oversubscribe_checkbox = QCheckBox("Activar oversubscribe")
+        self.mpi_oversubscribe_checkbox.setChecked(True)
+        self.mpi_map_by_edit = QLineEdit("node")
+        mpi_layout.addRow("Modo:", self.use_mpi_checkbox)
+        mpi_layout.addRow("Procesos:", self.mpi_processes_spin)
+        mpi_layout.addRow("Hostfile:", self.mpi_hostfile_edit)
+        mpi_layout.addRow("Oversubscribe:", self.mpi_oversubscribe_checkbox)
+        mpi_layout.addRow("Map by:", self.mpi_map_by_edit)
+
         output_group = QGroupBox("Salida y resultado")
         output_layout = QFormLayout(output_group)
 
@@ -258,6 +277,10 @@ class MainWindow(QMainWindow):
 
         output_layout.addRow("Ruta de salida:", self._wrap_layout(output_row))
         output_layout.addRow("Tiempo total:", self.execution_time_edit)
+        self.logs_edit = QTextEdit()
+        self.logs_edit.setReadOnly(True)
+        self.logs_edit.setPlaceholderText("Aqui se muestran logs DISPATCH/COMPLETE del backend MPI.")
+        output_layout.addRow("Logs:", self.logs_edit)
 
         action_row = QHBoxLayout()
         self.execute_button = QPushButton("Ejecutar")
@@ -272,6 +295,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
         layout.addWidget(transform_group)
         layout.addWidget(kernel_group)
+        layout.addWidget(mpi_group)
         layout.addWidget(output_group)
         layout.addWidget(backend_hint)
         layout.addStretch(1)
@@ -392,7 +416,18 @@ class MainWindow(QMainWindow):
             filters=selected_filters,
             kernel_gray=kernel_gray if "dg" in selected_filters else None,
             kernel_color=kernel_color if "dc" in selected_filters else None,
+            use_mpi=self.use_mpi_checkbox.isChecked(),
+            mpi_processes=self.mpi_processes_spin.value(),
+            mpi_hostfile=self.mpi_hostfile_edit.text().strip(),
+            mpi_oversubscribe=self.mpi_oversubscribe_checkbox.isChecked(),
+            mpi_map_by=self.mpi_map_by_edit.text().strip(),
         )
+
+        if request.use_mpi:
+            if not request.mpi_hostfile:
+                return ValidationResult(None, "En MPI, debes indicar un hostfile.")
+            if not request.mpi_map_by.strip():
+                return ValidationResult(None, "En MPI, el campo Map by no puede estar vacio.")
         return ValidationResult(request)
 
     def _is_valid_kernel(self, value: int) -> bool:
@@ -411,6 +446,7 @@ class MainWindow(QMainWindow):
 
         self.execute_button.setEnabled(False)
         self.execution_time_edit.setText("Procesando...")
+        self.logs_edit.clear()
         self.statusBar().showMessage("Ejecutando backend...")
 
         self._thread = QThread(self)
@@ -429,6 +465,16 @@ class MainWindow(QMainWindow):
         self.execution_time_edit.setText(f"{result.execution_time:.3f} s")
         self.output_dir_edit.setText(result.output_dir)
         self.statusBar().showMessage("Procesamiento finalizado.")
+        logs = "\n".join([
+            f"$ {' '.join(result.command)}",
+            "",
+            "[STDOUT]",
+            result.stdout.strip(),
+            "",
+            "[STDERR]",
+            result.stderr.strip(),
+        ]).strip()
+        self.logs_edit.setPlainText(logs)
 
         total_outputs = len(self.image_paths) * len(self.selected_filters())
         QMessageBox.information(
@@ -443,6 +489,7 @@ class MainWindow(QMainWindow):
     def on_processing_failed(self, error_message: str) -> None:
         self.execute_button.setEnabled(True)
         self.execution_time_edit.clear()
+        self.logs_edit.clear()
         self.statusBar().showMessage("Fallo la ejecucion del backend.")
         QMessageBox.critical(self, "Error de procesamiento", error_message)
 

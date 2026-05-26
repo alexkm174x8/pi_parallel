@@ -12,6 +12,8 @@ BACKEND_DIR = PROJECT_ROOT / "c_backend"
 BACKEND_BIN_DIR = BACKEND_DIR / "bin"
 BACKEND_EXECUTABLE = BACKEND_BIN_DIR / ("para_image_parra.exe" if sys.platform.startswith("win") else "para_image_parra")
 BACKEND_EXECUTABLE_FALLBACK = BACKEND_DIR / ("para_image_parra.exe" if sys.platform.startswith("win") else "para_image_parra")
+MPI_BACKEND_EXECUTABLE = BACKEND_BIN_DIR / ("para_image_parra_mpi.exe" if sys.platform.startswith("win") else "para_image_parra_mpi")
+MPI_BACKEND_EXECUTABLE_FALLBACK = BACKEND_DIR / ("para_image_parra_mpi.exe" if sys.platform.startswith("win") else "para_image_parra_mpi")
 TIME_PATTERN = re.compile(r"TOTAL_TIME=([0-9]*\.?[0-9]+)")
 
 
@@ -27,6 +29,11 @@ class ProcessingRequest:
     kernel_gray: int | None = None
     kernel_color: int | None = None
     executable: Path = BACKEND_EXECUTABLE
+    use_mpi: bool = False
+    mpi_processes: int = 4
+    mpi_hostfile: str = "machinefile"
+    mpi_oversubscribe: bool = True
+    mpi_map_by: str = "node"
 
 
 @dataclass(slots=True)
@@ -43,19 +50,21 @@ class BackendRunner:
         self.executable = executable or BACKEND_EXECUTABLE
 
     def run(self, request: ProcessingRequest) -> ProcessingResult:
-        executable = Path(request.executable or self.executable)
+        if request.use_mpi:
+            executable = Path(request.executable or MPI_BACKEND_EXECUTABLE)
+        else:
+            executable = Path(request.executable or self.executable)
         if not executable.exists():
-            executable = BACKEND_EXECUTABLE_FALLBACK
+            executable = MPI_BACKEND_EXECUTABLE_FALLBACK if request.use_mpi else BACKEND_EXECUTABLE_FALLBACK
         if not executable.exists():
-            raise BackendError(
-                "No se encontro el ejecutable del backend. "
-                "Compila primero c_backend/src/bmp_processor.c."
-            )
+            if request.use_mpi:
+                raise BackendError("No se encontro el ejecutable MPI. Compila c_backend/src/bmp_processor_mpi.c con mpicc.")
+            raise BackendError("No se encontro el ejecutable del backend. Compila primero c_backend/src/bmp_processor.c.")
 
         output_dir = Path(request.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        command = [
+        backend_command = [
             str(executable),
             "--output",
             str(output_dir),
@@ -64,11 +73,32 @@ class BackendRunner:
         ]
 
         if request.kernel_gray is not None:
-            command.extend(["--kernel-gray", str(request.kernel_gray)])
+            backend_command.extend(["--kernel-gray", str(request.kernel_gray)])
         if request.kernel_color is not None:
-            command.extend(["--kernel-color", str(request.kernel_color)])
+            backend_command.extend(["--kernel-color", str(request.kernel_color)])
 
-        command.extend(request.image_paths)
+        backend_command.extend(request.image_paths)
+
+        if request.use_mpi:
+            if request.mpi_processes < 1:
+                raise BackendError("El numero de procesos MPI debe ser mayor a 0.")
+
+            hostfile = Path(request.mpi_hostfile)
+            if not hostfile.is_absolute():
+                hostfile = PROJECT_ROOT / hostfile
+            if not hostfile.exists():
+                raise BackendError(f"No se encontro el hostfile MPI: {hostfile}")
+
+            command = ["mpirun"]
+            if request.mpi_oversubscribe:
+                command.append("--oversubscribe")
+            command.extend(["-np", str(request.mpi_processes), "--hostfile", str(hostfile)])
+            map_by = (request.mpi_map_by or "").strip()
+            if map_by:
+                command.extend(["--map-by", map_by])
+            command += backend_command
+        else:
+            command = backend_command
 
         creationflags = 0
         if sys.platform.startswith("win"):

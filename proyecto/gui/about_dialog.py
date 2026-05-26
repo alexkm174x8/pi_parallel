@@ -19,7 +19,7 @@ class AboutDialog(QDialog):
             "TC3003B\n"
             "Tecnológico de Monterrey\n"
             "Campus Puebla\n"
-            "Mayo 2026\n"
+            "Abril 2026\n"
             "Equipo:\n"
             "Estefanía Antonio Villaseca A01736897\n"
             "Miranda Eugenia Colorado Arróniz A01737023\n"
