@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
@@ -119,7 +120,8 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("BMP Parallel Studio")
-        self.resize(1080, 680)
+        self.resize(950, 650)
+        self.setMinimumSize(760, 520)
 
         self._thread: QThread | None = None
         self._worker: ProcessingWorker | None = None
@@ -171,7 +173,10 @@ class MainWindow(QMainWindow):
         root.addWidget(left_container, 5)
         root.addWidget(self._build_right_panel(), 4)
 
-        self.setCentralWidget(container)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(container)
+        self.setCentralWidget(scroll_area)
 
     def _build_left_panel(self) -> QWidget:
         panel = QFrame()
@@ -287,9 +292,11 @@ class MainWindow(QMainWindow):
         output_layout.addRow("Tiempo total:", self.execution_time_edit)
         self.logs_edit = QTextEdit()
         self.logs_edit.setReadOnly(True)
+        self.logs_edit.setMinimumHeight(120)
         self.logs_edit.setPlaceholderText("Aqui se muestran logs DISPATCH/COMPLETE del backend MPI.")
         self.summary_edit = QTextEdit()
         self.summary_edit.setReadOnly(True)
+        self.summary_edit.setMinimumHeight(120)
         self.summary_edit.setPlaceholderText("Resumen por nodo (tareas, imagenes, tiempo, errores).")
         output_layout.addRow("Logs:", self.logs_edit)
         output_layout.addRow("Resumen por nodo:", self.summary_edit)
