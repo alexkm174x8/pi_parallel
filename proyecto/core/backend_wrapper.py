@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 import re
 import subprocess
 import sys
@@ -28,12 +29,13 @@ class ProcessingRequest:
     filters: list[str]
     kernel_gray: int | None = None
     kernel_color: int | None = None
-    executable: Path = BACKEND_EXECUTABLE
+    executable: Path | None = None
     use_mpi: bool = False
     mpi_processes: int = 4
     mpi_hostfile: str = "machinefile"
     mpi_oversubscribe: bool = True
     mpi_map_by: str = "node"
+    mpi_shared_root: str = "/shared/proyecto"
 
 
 @dataclass(slots=True)
@@ -48,10 +50,52 @@ class ProcessingResult:
 class BackendRunner:
     def __init__(self, executable: Path | None = None) -> None:
         self.executable = executable or BACKEND_EXECUTABLE
+        self._process: subprocess.Popen[str] | None = None
 
-    def run(self, request: ProcessingRequest) -> ProcessingResult:
+    def cancel(self) -> None:
+        if self._process is None:
+            return
+        if self._process.poll() is None:
+            self._process.terminate()
+
+    def run(self, request: ProcessingRequest, on_output: Callable[[str], None] | None = None) -> ProcessingResult:
+        shared_root = (request.mpi_shared_root or "").strip()
+        if request.use_mpi and not shared_root:
+            raise BackendError("En modo MPI debes indicar una carpeta compartida (shared root).")
+
+        def to_mpi_shared_path(path_value: str) -> str:
+            path_obj = Path(path_value)
+            if path_obj.is_absolute() and str(path_obj).startswith(shared_root):
+                return str(path_obj)
+
+            candidate_prefixes: list[str] = [str(PROJECT_ROOT)]
+            parent = PROJECT_ROOT.parent
+            candidate_prefixes.append(str(parent))
+
+            if "/shared/" in str(PROJECT_ROOT):
+                base = str(PROJECT_ROOT)
+                shared_index = base.find("/shared/")
+                if shared_index > 0:
+                    candidate_prefixes.append(base[:shared_index] + base[shared_index:])
+
+            normalized = str(path_obj)
+            for prefix in sorted(set(candidate_prefixes), key=len, reverse=True):
+                if normalized.startswith(prefix + "/"):
+                    suffix = normalized[len(prefix):].lstrip("/")
+                    return f"{shared_root.rstrip('/')}/{suffix}"
+
+            if normalized.startswith("/home/") and "/shared/" in normalized:
+                shared_pos = normalized.find("/shared/")
+                suffix = normalized[shared_pos + len("/shared/"):]
+                return f"{shared_root.rstrip('/')}/{suffix}"
+
+            if not path_obj.is_absolute():
+                return f"{shared_root.rstrip('/')}/{normalized.lstrip('./')}"
+
+            return normalized
+
         if request.use_mpi:
-            executable = Path(request.executable or MPI_BACKEND_EXECUTABLE)
+            executable = Path(f"{shared_root.rstrip('/')}/c_backend/bin/{MPI_BACKEND_EXECUTABLE.name}")
         else:
             executable = Path(request.executable or self.executable)
         if not executable.exists():
@@ -61,7 +105,8 @@ class BackendRunner:
                 raise BackendError("No se encontro el ejecutable MPI. Compila c_backend/src/bmp_processor_mpi.c con mpicc.")
             raise BackendError("No se encontro el ejecutable del backend. Compila primero c_backend/src/bmp_processor.c.")
 
-        output_dir = Path(request.output_dir)
+        output_dir_value = to_mpi_shared_path(request.output_dir) if request.use_mpi else request.output_dir
+        output_dir = Path(output_dir_value)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         backend_command = [
@@ -77,7 +122,8 @@ class BackendRunner:
         if request.kernel_color is not None:
             backend_command.extend(["--kernel-color", str(request.kernel_color)])
 
-        backend_command.extend(request.image_paths)
+        image_paths = [to_mpi_shared_path(path) for path in request.image_paths] if request.use_mpi else request.image_paths
+        backend_command.extend(image_paths)
 
         if request.use_mpi:
             if request.mpi_processes < 1:
@@ -85,7 +131,7 @@ class BackendRunner:
 
             hostfile = Path(request.mpi_hostfile)
             if not hostfile.is_absolute():
-                hostfile = PROJECT_ROOT / hostfile
+                hostfile = Path(to_mpi_shared_path(str(hostfile)))
             if not hostfile.exists():
                 raise BackendError(f"No se encontro el hostfile MPI: {hostfile}")
 
@@ -104,29 +150,41 @@ class BackendRunner:
         if sys.platform.startswith("win"):
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-        completed = subprocess.run(
+        self._process = subprocess.Popen(
             command,
             cwd=PROJECT_ROOT,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
             creationflags=creationflags,
-            check=False,
         )
 
-        if completed.returncode != 0:
-            error_text = completed.stderr.strip() or completed.stdout.strip() or "El backend devolvio un error."
-            raise BackendError(error_text)
+        output_lines: list[str] = []
+        if self._process.stdout is not None:
+            for line in self._process.stdout:
+                output_lines.append(line)
+                if on_output is not None:
+                    on_output(line.rstrip("\n"))
 
-        match = TIME_PATTERN.search(completed.stdout)
+        return_code = self._process.wait()
+        stdout_text = "".join(output_lines)
+        self._process = None
+
+        if return_code != 0:
+            error_text = stdout_text.strip() or "El backend devolvio un error."
+            command_text = " ".join(command)
+            raise BackendError(f"Comando ejecutado:\n{command_text}\n\n{error_text}")
+
+        match = TIME_PATTERN.search(stdout_text)
         if not match:
             raise BackendError("No se pudo leer el tiempo total desde la salida del backend.")
 
         return ProcessingResult(
             execution_time=float(match.group(1)),
             output_dir=str(output_dir),
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            stdout=stdout_text,
+            stderr="",
             command=command,
         )

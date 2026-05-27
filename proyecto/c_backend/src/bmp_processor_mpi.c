@@ -258,6 +258,16 @@ static void print_complete_log(int rank, const char *node_name, const char *resu
     fflush(stdout);
 }
 
+static void wrap_result_with_meta(const char *node_name, const char *task, const char *raw_result,
+                                  double seconds, char *wrapped_result, size_t wrapped_size) {
+    char input_path[MAX_PATH_LEN];
+    char filter[32];
+    parse_task_for_log(task, input_path, sizeof(input_path), filter, sizeof(filter));
+    snprintf(wrapped_result, wrapped_size,
+             "worker=%s\timage=%s\tfilter=%s\tseconds=%.6f\t%s",
+             node_name, input_path, filter, seconds, raw_result);
+}
+
 int main(int argc, char *argv[]) {
     int provided = 0;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_SERIALIZED, &provided);
@@ -584,7 +594,12 @@ int main(int argc, char *argv[]) {
 
             if (tasks_sent < total_tasks) {
                 print_dispatch_log(0, node_name, 0, node_name, tasks[tasks_sent], output_dir_buf);
+                double task_start = MPI_Wtime();
                 execute_task(tasks[tasks_sent], output_dir_buf, result_buf, sizeof(result_buf));
+                double task_seconds = MPI_Wtime() - task_start;
+                char wrapped_result[BUF_SIZE];
+                wrap_result_with_meta(node_name, tasks[tasks_sent], result_buf, task_seconds, wrapped_result, sizeof(wrapped_result));
+                snprintf(result_buf, sizeof(result_buf), "%s", wrapped_result);
                 tasks_sent++;
                 tasks_completed++;
 
@@ -637,10 +652,12 @@ int main(int argc, char *argv[]) {
             }
 
             char result_msg[BUF_SIZE];
+            double task_start = MPI_Wtime();
             execute_task(task_buf, output_dir_buf, result_msg, sizeof(result_msg));
+            double task_seconds = MPI_Wtime() - task_start;
 
             char wrapped_result[BUF_SIZE];
-            snprintf(wrapped_result, sizeof(wrapped_result), "worker=%s\t%s", node_name, result_msg);
+            wrap_result_with_meta(node_name, task_buf, result_msg, task_seconds, wrapped_result, sizeof(wrapped_result));
             MPI_Send(wrapped_result, (int)strlen(wrapped_result) + 1, MPI_CHAR, 0, TAG_RESULT, MPI_COMM_WORLD);
         }
     }
