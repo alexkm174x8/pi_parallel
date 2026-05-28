@@ -258,6 +258,26 @@ static void print_complete_log(int rank, const char *node_name, const char *resu
     fflush(stdout);
 }
 
+static void print_image_assign_log(int rank, const char *node_name, const char *image_path, const FilterSelection *filters) {
+    char filters_text[128];
+    filters_text[0] = '\0';
+
+    if (filters->vg) strcat(filters_text, "vg,");
+    if (filters->vc) strcat(filters_text, "vc,");
+    if (filters->hg) strcat(filters_text, "hg,");
+    if (filters->hc) strcat(filters_text, "hc,");
+    if (filters->dg) strcat(filters_text, "dg,");
+    if (filters->dc) strcat(filters_text, "dc,");
+
+    size_t len = strlen(filters_text);
+    if (len > 0 && filters_text[len - 1] == ',') {
+        filters_text[len - 1] = '\0';
+    }
+
+    printf("IMAGE_ASSIGN rank=%d node=%s image=%s filters=%s\n", rank, node_name, image_path, filters_text);
+    fflush(stdout);
+}
+
 static void wrap_result_with_meta(const char *node_name, const char *task, const char *raw_result,
                                   double seconds, char *wrapped_result, size_t wrapped_size) {
     char input_path[MAX_PATH_LEN];
@@ -292,12 +312,14 @@ int main(int argc, char *argv[]) {
 
     const char *output_dir = NULL;
     const char *image_paths[MAX_IMAGES];
+    char image_storage[MAX_IMAGES][MAX_PATH_LEN];
     int image_count = 0;
     int kernel_gray = 0;
     int kernel_color = 0;
     FilterSelection filters;
 
     memset(&filters, 0, sizeof(filters));
+    memset(image_storage, 0, sizeof(image_storage));
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0) {
@@ -349,7 +371,8 @@ int main(int argc, char *argv[]) {
                     MPI_Abort(MPI_COMM_WORLD, 1);
                     return 1;
                 }
-                image_paths[image_count++] = argv[i];
+                snprintf(image_storage[image_count], sizeof(image_storage[image_count]), "%s", argv[i]);
+                image_paths[image_count++] = image_storage[image_count];
             }
         }
 
@@ -426,7 +449,7 @@ int main(int argc, char *argv[]) {
         filters.dc = filters_buf[5];
     }
 
-    /* Broadcast image count and image paths to workers */
+    /* Broadcast image count and image paths to all ranks */
     if (rank == 0) {
         MPI_Bcast(&image_count, 1, MPI_INT, 0, MPI_COMM_WORLD);
         for (int i = 0; i < image_count; i++) {
@@ -440,8 +463,8 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < image_count; i++) {
             char tmp[MAX_PATH_LEN];
             MPI_Bcast(tmp, MAX_PATH_LEN, MPI_CHAR, 0, MPI_COMM_WORLD);
-            /* store into image_paths array allocated only on rank 0 previously; workers don't need to store */
-            /* We won't use this array on workers since tasks are sent by master. */
+            snprintf(image_storage[i], sizeof(image_storage[i]), "%s", tmp);
+            image_paths[i] = image_storage[i];
         }
     }
 
@@ -539,94 +562,108 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* Timing starts here on master */
-    double start_time = 0.0;
-    if (rank == 0) start_time = MPI_Wtime();
+    MPI_Barrier(MPI_COMM_WORLD);
+    double start_time = MPI_Wtime();
 
-    const int TAG_TASK = 1;
-    const int TAG_RESULT = 2;
+    int local_failed_tasks = 0;
+
+    for (int i = 0; i < image_count; i++) {
+        if ((i % size) != rank) {
+            continue;
+        }
+
+        print_image_assign_log(rank, node_name, image_paths[i], &filters);
+
+        if (filters.vg) {
+            char task[BUF_SIZE];
+            char result_msg[BUF_SIZE];
+            snprintf(task, sizeof(task), "%s\t%s\t%d", image_paths[i], "vg", 0);
+            double task_start = MPI_Wtime();
+            execute_task(task, output_dir_buf, result_msg, sizeof(result_msg));
+            double task_seconds = MPI_Wtime() - task_start;
+            char wrapped_result[BUF_SIZE];
+            wrap_result_with_meta(node_name, task, result_msg, task_seconds, wrapped_result, sizeof(wrapped_result));
+            if (is_error_result(wrapped_result)) local_failed_tasks++;
+            print_complete_log(rank, node_name, wrapped_result);
+        }
+
+        if (filters.vc) {
+            char task[BUF_SIZE];
+            char result_msg[BUF_SIZE];
+            snprintf(task, sizeof(task), "%s\t%s\t%d", image_paths[i], "vc", 0);
+            double task_start = MPI_Wtime();
+            execute_task(task, output_dir_buf, result_msg, sizeof(result_msg));
+            double task_seconds = MPI_Wtime() - task_start;
+            char wrapped_result[BUF_SIZE];
+            wrap_result_with_meta(node_name, task, result_msg, task_seconds, wrapped_result, sizeof(wrapped_result));
+            if (is_error_result(wrapped_result)) local_failed_tasks++;
+            print_complete_log(rank, node_name, wrapped_result);
+        }
+
+        if (filters.hg) {
+            char task[BUF_SIZE];
+            char result_msg[BUF_SIZE];
+            snprintf(task, sizeof(task), "%s\t%s\t%d", image_paths[i], "hg", 0);
+            double task_start = MPI_Wtime();
+            execute_task(task, output_dir_buf, result_msg, sizeof(result_msg));
+            double task_seconds = MPI_Wtime() - task_start;
+            char wrapped_result[BUF_SIZE];
+            wrap_result_with_meta(node_name, task, result_msg, task_seconds, wrapped_result, sizeof(wrapped_result));
+            if (is_error_result(wrapped_result)) local_failed_tasks++;
+            print_complete_log(rank, node_name, wrapped_result);
+        }
+
+        if (filters.hc) {
+            char task[BUF_SIZE];
+            char result_msg[BUF_SIZE];
+            snprintf(task, sizeof(task), "%s\t%s\t%d", image_paths[i], "hc", 0);
+            double task_start = MPI_Wtime();
+            execute_task(task, output_dir_buf, result_msg, sizeof(result_msg));
+            double task_seconds = MPI_Wtime() - task_start;
+            char wrapped_result[BUF_SIZE];
+            wrap_result_with_meta(node_name, task, result_msg, task_seconds, wrapped_result, sizeof(wrapped_result));
+            if (is_error_result(wrapped_result)) local_failed_tasks++;
+            print_complete_log(rank, node_name, wrapped_result);
+        }
+
+        if (filters.dg) {
+            char task[BUF_SIZE];
+            char result_msg[BUF_SIZE];
+            snprintf(task, sizeof(task), "%s\t%s\t%d", image_paths[i], "dg", kernel_gray);
+            double task_start = MPI_Wtime();
+            execute_task(task, output_dir_buf, result_msg, sizeof(result_msg));
+            double task_seconds = MPI_Wtime() - task_start;
+            char wrapped_result[BUF_SIZE];
+            wrap_result_with_meta(node_name, task, result_msg, task_seconds, wrapped_result, sizeof(wrapped_result));
+            if (is_error_result(wrapped_result)) local_failed_tasks++;
+            print_complete_log(rank, node_name, wrapped_result);
+        }
+
+        if (filters.dc) {
+            char task[BUF_SIZE];
+            char result_msg[BUF_SIZE];
+            snprintf(task, sizeof(task), "%s\t%s\t%d", image_paths[i], "dc", kernel_color);
+            double task_start = MPI_Wtime();
+            execute_task(task, output_dir_buf, result_msg, sizeof(result_msg));
+            double task_seconds = MPI_Wtime() - task_start;
+            char wrapped_result[BUF_SIZE];
+            wrap_result_with_meta(node_name, task, result_msg, task_seconds, wrapped_result, sizeof(wrapped_result));
+            if (is_error_result(wrapped_result)) local_failed_tasks++;
+            print_complete_log(rank, node_name, wrapped_result);
+        }
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    double total = MPI_Wtime() - start_time;
+
+    int global_failed_tasks = 0;
+    MPI_Reduce(&local_failed_tasks, &global_failed_tasks, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
 
     if (rank == 0) {
-        int tasks_sent = 0;
-        int tasks_completed = 0;
-        int failed_tasks = 0;
-
-        /* Initial distribution: send one task to each worker (if available) */
-        for (int dest = 1; dest < size; dest++) {
-            if (tasks_sent < total_tasks) {
-                print_dispatch_log(0, node_name, dest, all_node_names + (dest * NODE_NAME_LEN), tasks[tasks_sent], output_dir_buf);
-                MPI_Send(tasks[tasks_sent], (int)strlen(tasks[tasks_sent]) + 1, MPI_CHAR, dest, TAG_TASK, MPI_COMM_WORLD);
-                tasks_sent++;
-            } else {
-                MPI_Send("STOP", 5, MPI_CHAR, dest, TAG_TASK, MPI_COMM_WORLD);
-            }
-        }
-
-        /* Receive results and send new tasks until all are done */
-        while (tasks_completed < total_tasks) {
-            char result_buf[BUF_SIZE];
-            MPI_Status status;
-
-            int has_result = 0;
-            MPI_Iprobe(MPI_ANY_SOURCE, TAG_RESULT, MPI_COMM_WORLD, &has_result, &status);
-
-            if (has_result) {
-                MPI_Recv(result_buf, BUF_SIZE, MPI_CHAR, status.MPI_SOURCE, TAG_RESULT, MPI_COMM_WORLD, &status);
-                tasks_completed++;
-
-                if (is_error_result(result_buf)) {
-                    failed_tasks++;
-                    fprintf(stderr, "MPI task failed on rank %d: %s\n", status.MPI_SOURCE, result_buf);
-                }
-                print_complete_log(status.MPI_SOURCE, all_node_names + (status.MPI_SOURCE * NODE_NAME_LEN), result_buf);
-
-                if (tasks_sent < total_tasks) {
-                    print_dispatch_log(0, node_name, status.MPI_SOURCE,
-                                       all_node_names + (status.MPI_SOURCE * NODE_NAME_LEN), tasks[tasks_sent], output_dir_buf);
-                    MPI_Send(tasks[tasks_sent], (int)strlen(tasks[tasks_sent]) + 1, MPI_CHAR, status.MPI_SOURCE, TAG_TASK, MPI_COMM_WORLD);
-                    tasks_sent++;
-                } else {
-                    MPI_Send("STOP", 5, MPI_CHAR, status.MPI_SOURCE, TAG_TASK, MPI_COMM_WORLD);
-                }
-
-                continue;
-            }
-
-            if (tasks_sent < total_tasks) {
-                print_dispatch_log(0, node_name, 0, node_name, tasks[tasks_sent], output_dir_buf);
-                double task_start = MPI_Wtime();
-                execute_task(tasks[tasks_sent], output_dir_buf, result_buf, sizeof(result_buf));
-                double task_seconds = MPI_Wtime() - task_start;
-                char wrapped_result[BUF_SIZE];
-                wrap_result_with_meta(node_name, tasks[tasks_sent], result_buf, task_seconds, wrapped_result, sizeof(wrapped_result));
-                snprintf(result_buf, sizeof(result_buf), "%s", wrapped_result);
-                tasks_sent++;
-                tasks_completed++;
-
-                if (is_error_result(result_buf)) {
-                    failed_tasks++;
-                    fprintf(stderr, "MPI task failed on rank 0: %s\n", result_buf);
-                }
-                print_complete_log(0, node_name, result_buf);
-            } else {
-                MPI_Recv(result_buf, BUF_SIZE, MPI_CHAR, MPI_ANY_SOURCE, TAG_RESULT, MPI_COMM_WORLD, &status);
-                tasks_completed++;
-
-                if (is_error_result(result_buf)) {
-                    failed_tasks++;
-                    fprintf(stderr, "MPI task failed on rank %d: %s\n", status.MPI_SOURCE, result_buf);
-                }
-                print_complete_log(status.MPI_SOURCE, all_node_names + (status.MPI_SOURCE * NODE_NAME_LEN), result_buf);
-
-                MPI_Send("STOP", 5, MPI_CHAR, status.MPI_SOURCE, TAG_TASK, MPI_COMM_WORLD);
-            }
-        }
-
-        double total = MPI_Wtime() - start_time;
+        printf("MPI_BACKEND_VERSION=image-distribution-v2\n");
         printf("TOTAL_TIME=%.6f\n", total);
         printf("OUTPUT_DIR=%s\n", output_dir_buf);
 
-        /* free tasks */
         for (int i = 0; i < total_tasks; i++) {
             free(tasks[i]);
         }
@@ -635,30 +672,10 @@ int main(int argc, char *argv[]) {
             free(all_node_names);
         }
 
-        if (failed_tasks > 0) {
-            fprintf(stderr, "MPI finished with %d failed task(s).\n", failed_tasks);
+        if (global_failed_tasks > 0) {
+            fprintf(stderr, "MPI finished with %d failed task(s).\n", global_failed_tasks);
             MPI_Finalize();
             return 1;
-        }
-
-    } else {
-        /* Worker loop */
-        while (1) {
-            char task_buf[BUF_SIZE];
-            MPI_Status status;
-            MPI_Recv(task_buf, BUF_SIZE, MPI_CHAR, 0, TAG_TASK, MPI_COMM_WORLD, &status);
-            if (strcmp(task_buf, "STOP") == 0) {
-                break;
-            }
-
-            char result_msg[BUF_SIZE];
-            double task_start = MPI_Wtime();
-            execute_task(task_buf, output_dir_buf, result_msg, sizeof(result_msg));
-            double task_seconds = MPI_Wtime() - task_start;
-
-            char wrapped_result[BUF_SIZE];
-            wrap_result_with_meta(node_name, task_buf, result_msg, task_seconds, wrapped_result, sizeof(wrapped_result));
-            MPI_Send(wrapped_result, (int)strlen(wrapped_result) + 1, MPI_CHAR, 0, TAG_RESULT, MPI_COMM_WORLD);
         }
     }
 

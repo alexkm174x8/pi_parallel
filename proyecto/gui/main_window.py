@@ -263,6 +263,8 @@ class MainWindow(QMainWindow):
         self.mpi_processes_spin.setValue(6)
         self.mpi_hostfile_edit = QLineEdit(str(DEFAULT_MACHINEFILE))
         self.mpi_shared_root_edit = QLineEdit(DEFAULT_SHARED_ROOT)
+        self.mpi_auto_detect_checkbox = QCheckBox("Auto-detectar nodos disponibles")
+        self.mpi_auto_detect_checkbox.setChecked(True)
         self.mpi_oversubscribe_checkbox = QCheckBox("Activar oversubscribe")
         self.mpi_oversubscribe_checkbox.setChecked(True)
         self.mpi_map_by_edit = QLineEdit("node")
@@ -270,6 +272,7 @@ class MainWindow(QMainWindow):
         mpi_layout.addRow("Procesos:", self.mpi_processes_spin)
         mpi_layout.addRow("Hostfile:", self.mpi_hostfile_edit)
         mpi_layout.addRow("Shared root:", self.mpi_shared_root_edit)
+        mpi_layout.addRow("Deteccion:", self.mpi_auto_detect_checkbox)
         mpi_layout.addRow("Oversubscribe:", self.mpi_oversubscribe_checkbox)
         mpi_layout.addRow("Map by:", self.mpi_map_by_edit)
 
@@ -445,6 +448,7 @@ class MainWindow(QMainWindow):
             mpi_oversubscribe=self.mpi_oversubscribe_checkbox.isChecked(),
             mpi_map_by=self.mpi_map_by_edit.text().strip(),
             mpi_shared_root=self.mpi_shared_root_edit.text().strip(),
+            mpi_auto_detect_nodes=self.mpi_auto_detect_checkbox.isChecked(),
         )
 
         if request.use_mpi:
@@ -584,6 +588,7 @@ class MainWindow(QMainWindow):
 
     def _build_node_summary(self, stdout: str, total_time: float) -> str:
         dispatch_re = re.compile(r"^DISPATCH\s+source_rank=(\d+)\s+source_node=(\S+)\s+target_rank=(\d+)\s+target_node=(\S+)\s+image=(\S+)\s+filter=(\S+)\s+output=(\S+)")
+        image_assign_re = re.compile(r"^IMAGE_ASSIGN\s+rank=(\d+)\s+node=(\S+)\s+image=(\S+)\s+filters=(\S*)")
         complete_re = re.compile(r"^COMPLETE\s+rank=(\d+)\s+node=(\S+)\s+(.+)$")
         seconds_re = re.compile(r"seconds=([0-9]*\.?[0-9]+)")
         image_re = re.compile(r"image=([^\t\s]+)")
@@ -596,6 +601,7 @@ class MainWindow(QMainWindow):
                 by_node[node] = {
                     "rank": "?",
                     "sent": 0,
+                    "assigned_images": 0,
                     "completed": 0,
                     "errors": 0,
                     "seconds": 0.0,
@@ -624,6 +630,25 @@ class MainWindow(QMainWindow):
                     cast_images.add(image)
                 if isinstance(cast_filters, set):
                     cast_filters.add(flt)
+                continue
+
+            ia = image_assign_re.match(line)
+            if ia:
+                rank = ia.group(1)
+                node = ia.group(2)
+                image = Path(ia.group(3)).name
+                filters_text = ia.group(4)
+                entry = get_node_entry(node)
+                entry["rank"] = rank
+                entry["assigned_images"] = int(entry["assigned_images"]) + 1
+                cast_images = entry["images"]
+                cast_filters = entry["filters"]
+                if isinstance(cast_images, set):
+                    cast_images.add(image)
+                if filters_text and isinstance(cast_filters, set):
+                    for flt in filters_text.split(","):
+                        if flt:
+                            cast_filters.add(flt)
                 continue
 
             c = complete_re.match(line)
@@ -666,10 +691,13 @@ class MainWindow(QMainWindow):
             images = sorted(stats["images"]) if isinstance(stats["images"], set) else []
             filters = sorted(stats["filters"]) if isinstance(stats["filters"], set) else []
             lines.append(f"Nodo {node} (rank {stats['rank']})")
-            lines.append(f"- Tareas enviadas: {stats['sent']}")
+            lines.append(f"- Imagenes asignadas: {stats['assigned_images']}")
+            lines.append(f"- Tareas enviadas (legacy): {stats['sent']}")
             lines.append(f"- Tareas completadas: {stats['completed']}")
             lines.append(f"- Errores: {stats['errors']}")
-            lines.append(f"- Tiempo acumulado de tareas: {float(stats['seconds']):.3f} s")
+            lines.append(f"- Suma de tiempos de tareas: {float(stats['seconds']):.3f} s")
+            avg = float(stats['seconds']) / int(stats['completed']) if int(stats['completed']) > 0 else 0.0
+            lines.append(f"- Promedio por tarea: {avg:.3f} s")
             lines.append(f"- Imagenes: {', '.join(images) if images else '(sin datos)'}")
             lines.append(f"- Filtros: {', '.join(filters) if filters else '(sin datos)'}")
             lines.append("")

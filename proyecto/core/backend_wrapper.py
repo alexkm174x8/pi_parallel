@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import socket
+import tempfile
 from typing import Callable
 import re
 import subprocess
@@ -36,6 +39,7 @@ class ProcessingRequest:
     mpi_oversubscribe: bool = True
     mpi_map_by: str = "node"
     mpi_shared_root: str = "/shared/proyecto"
+    mpi_auto_detect_nodes: bool = True
 
 
 @dataclass(slots=True)
@@ -135,10 +139,122 @@ class BackendRunner:
             if not hostfile.exists():
                 raise BackendError(f"No se encontro el hostfile MPI: {hostfile}")
 
+            alive_hostfile = hostfile
+            adjusted_np = request.mpi_processes
+            tmp_hostfile_path: Path | None = None
+
+            def log_line(text: str) -> None:
+                if on_output is not None:
+                    on_output(text)
+
+            def parse_hosts(file_path: Path) -> list[tuple[str, int, str]]:
+                entries: list[tuple[str, int, str]] = []
+                for raw in file_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    line = raw.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split()
+                    host = parts[0]
+                    slots = 1
+                    for part in parts[1:]:
+                        if part.startswith("slots="):
+                            try:
+                                slots = max(1, int(part.split("=", 1)[1]))
+                            except ValueError:
+                                slots = 1
+                    entries.append((host, slots, line))
+                return entries
+
+            def node_available(host: str) -> tuple[bool, str]:
+                check_cmd = (
+                    f"test -x {shared_root.rstrip('/')}/c_backend/bin/{MPI_BACKEND_EXECUTABLE.name} "
+                    f"&& test -d {shared_root.rstrip('/')}/img "
+                    f"&& test -d {shared_root.rstrip('/')}/output"
+                )
+                local_hostnames = {
+                    "localhost",
+                    "127.0.0.1",
+                    socket.gethostname(),
+                    socket.getfqdn(),
+                    socket.gethostname().split(".")[0],
+                    socket.getfqdn().split(".")[0],
+                }
+                if host in local_hostnames:
+                    cmd = ["sh", "-lc", check_cmd]
+                    mode = "local"
+                else:
+                    cmd = [
+                        "ssh",
+                        "-o",
+                        "BatchMode=yes",
+                        "-o",
+                        "ConnectTimeout=3",
+                        host,
+                        check_cmd,
+                    ]
+                    mode = "ssh"
+                try:
+                    completed = subprocess.run(cmd, capture_output=True, text=True, timeout=6, check=False)
+                except subprocess.TimeoutExpired:
+                    return False, "timeout"
+                if completed.returncode == 0:
+                    return True, mode
+                err = (completed.stderr or completed.stdout or "failed").strip().replace("\n", " ")
+                return False, err[:120]
+
+            if request.mpi_auto_detect_nodes:
+                log_line("Detectando nodos disponibles...")
+                host_entries = parse_hosts(hostfile)
+                if not host_entries:
+                    raise BackendError(f"El hostfile esta vacio o invalido: {hostfile}")
+
+                alive_entries: list[tuple[str, int, str]] = []
+                dead_entries: list[tuple[str, str]] = []
+
+                for host, slots, original in host_entries:
+                    ok, reason = node_available(host)
+                    if ok:
+                        alive_entries.append((host, slots, original))
+                        log_line(f"CHECK {host} OK slots={slots} via={reason}")
+                    else:
+                        dead_entries.append((host, reason))
+                        log_line(f"CHECK {host} FAIL {reason}")
+
+                if not alive_entries:
+                    raise BackendError("No hay nodos disponibles para ejecutar MPI.")
+
+                total_alive_slots = sum(slots for _, slots, _ in alive_entries)
+                adjusted_np = min(request.mpi_processes, total_alive_slots)
+                if adjusted_np < 1:
+                    raise BackendError("No hay slots disponibles en nodos activos.")
+
+                fd, tmp_path = tempfile.mkstemp(prefix="mpi_alive_hosts_", text=True)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as tmpf:
+                        for _, _, original in alive_entries:
+                            tmpf.write(original + "\n")
+                except Exception:
+                    Path(tmp_path).unlink(missing_ok=True)
+                    raise
+
+                tmp_hostfile_path = Path(tmp_path)
+                alive_hostfile = tmp_hostfile_path
+
+                alive_names = ", ".join(host for host, _, _ in alive_entries)
+                log_line(f"Nodos disponibles: {alive_names}")
+                if dead_entries:
+                    ignored_names = ", ".join(host for host, _ in dead_entries)
+                    log_line(f"Nodos ignorados: {ignored_names}")
+                log_line(f"Slots disponibles: {total_alive_slots}")
+                log_line(f"Procesos solicitados: {request.mpi_processes}")
+                log_line(f"Procesos MPI ajustados: {adjusted_np}")
+                log_line(f"Hostfile temporal: {alive_hostfile}")
+                log_line("Iniciando procesamiento MPI...")
+
             command = ["mpirun"]
             if request.mpi_oversubscribe:
                 command.append("--oversubscribe")
-            command.extend(["-np", str(request.mpi_processes), "--hostfile", str(hostfile)])
+            command.extend(["-np", str(adjusted_np), "--hostfile", str(alive_hostfile)])
             map_by = (request.mpi_map_by or "").strip()
             if map_by:
                 command.extend(["--map-by", map_by])
@@ -171,6 +287,9 @@ class BackendRunner:
         return_code = self._process.wait()
         stdout_text = "".join(output_lines)
         self._process = None
+
+        if request.use_mpi and "tmp_hostfile_path" in locals() and tmp_hostfile_path is not None:
+            tmp_hostfile_path.unlink(missing_ok=True)
 
         if return_code != 0:
             error_text = stdout_text.strip() or "El backend devolvio un error."
