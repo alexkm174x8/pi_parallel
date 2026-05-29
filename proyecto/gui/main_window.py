@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtGui import QAction, QPixmap
@@ -38,7 +39,9 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -55,6 +58,8 @@ from gui.about_dialog import AboutDialog
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs"
+DEFAULT_MACHINEFILE = Path("/shared/proyecto/hosts")
+DEFAULT_SHARED_ROOT = "/shared/proyecto"
 MAX_IMAGES = 10
 
 # Mapeo código de filtro → etiqueta visible en la UI.
@@ -145,29 +150,9 @@ class DropArea(QFrame):
 # ===========================================================================
 
 class ProcessingWorker(QObject):
-    """
-    Worker que corre BackendRunner.run() en un QThread separado.
-
-    Al ejecutarse en un hilo distinto al hilo principal de Qt, la GUI
-    no se congela mientras el backend C procesa las imágenes.
-
-    Señales:
-        finished(ProcessingResult): Emitida cuando el backend termina con éxito.
-                                    Conectada a MainWindow.on_processing_finished().
-        failed(str):                Emitida si ocurre BackendError u otra excepción.
-                                    Conectada a MainWindow.on_processing_failed().
-
-    Uso en MainWindow.start_processing():
-        self._thread = QThread(self)
-        self._worker = ProcessingWorker(request)
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.finished.connect(self.on_processing_finished)
-        self._thread.start()
-    """
-
-    finished = Signal(object)   # object = ProcessingResult
-    failed = Signal(str)        # str = mensaje de error
+    finished = Signal(object)
+    failed = Signal(str)
+    log_line = Signal(str)
 
     def __init__(self, request: ProcessingRequest) -> None:
         """
@@ -187,7 +172,7 @@ class ProcessingWorker(QObject):
         convierte en la señal failed para que la GUI las muestre.
         """
         try:
-            result = self.runner.run(self.request)
+            result = self.runner.run(self.request, on_output=self.log_line.emit)
         except BackendError as exc:
             self.failed.emit(str(exc))
             return
@@ -196,6 +181,9 @@ class ProcessingWorker(QObject):
             return
 
         self.finished.emit(result)
+
+    def cancel(self) -> None:
+        self.runner.cancel()
 
 
 # ===========================================================================
@@ -246,7 +234,8 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("BMP Parallel Studio")
-        self.resize(1080, 680)
+        self.resize(950, 650)
+        self.setMinimumSize(760, 520)
 
         self._thread: QThread | None = None
         self._worker: ProcessingWorker | None = None
@@ -285,7 +274,11 @@ class MainWindow(QMainWindow):
         root.setSpacing(18)
         root.addWidget(self._build_left_panel(), 5)
         root.addWidget(self._build_right_panel(), 4)
-        self.setCentralWidget(container)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(container)
+        self.setCentralWidget(scroll_area)
 
     def _build_left_panel(self) -> QWidget:
         """
@@ -427,7 +420,28 @@ class MainWindow(QMainWindow):
         kernel_layout.addRow("Kernel gris:", self.kernel_gray_spin)
         kernel_layout.addRow("Kernel color:", self.kernel_color_spin)
 
-        # --- Grupo de salida ---
+        mpi_group = QGroupBox("Ejecucion MPI")
+        mpi_layout = QFormLayout(mpi_group)
+        self.use_mpi_checkbox = QCheckBox("Usar cluster MPI")
+        self.use_mpi_checkbox.setChecked(True)
+        self.mpi_processes_spin = QSpinBox()
+        self.mpi_processes_spin.setRange(1, 128)
+        self.mpi_processes_spin.setValue(6)
+        self.mpi_hostfile_edit = QLineEdit(str(DEFAULT_MACHINEFILE))
+        self.mpi_shared_root_edit = QLineEdit(DEFAULT_SHARED_ROOT)
+        self.mpi_auto_detect_checkbox = QCheckBox("Auto-detectar nodos disponibles")
+        self.mpi_auto_detect_checkbox.setChecked(True)
+        self.mpi_oversubscribe_checkbox = QCheckBox("Activar oversubscribe")
+        self.mpi_oversubscribe_checkbox.setChecked(True)
+        self.mpi_map_by_edit = QLineEdit("node")
+        mpi_layout.addRow("Modo:", self.use_mpi_checkbox)
+        mpi_layout.addRow("Procesos:", self.mpi_processes_spin)
+        mpi_layout.addRow("Hostfile:", self.mpi_hostfile_edit)
+        mpi_layout.addRow("Shared root:", self.mpi_shared_root_edit)
+        mpi_layout.addRow("Deteccion:", self.mpi_auto_detect_checkbox)
+        mpi_layout.addRow("Oversubscribe:", self.mpi_oversubscribe_checkbox)
+        mpi_layout.addRow("Map by:", self.mpi_map_by_edit)
+
         output_group = QGroupBox("Salida y resultado")
         output_layout = QFormLayout(output_group)
 
@@ -445,18 +459,31 @@ class MainWindow(QMainWindow):
 
         output_layout.addRow("Ruta de salida:", self._wrap_layout(output_row))
         output_layout.addRow("Tiempo total:", self.execution_time_edit)
+        self.logs_edit = QTextEdit()
+        self.logs_edit.setReadOnly(True)
+        self.logs_edit.setMinimumHeight(120)
+        self.logs_edit.setPlaceholderText("Aqui se muestran logs DISPATCH/COMPLETE del backend MPI.")
+        self.summary_edit = QTextEdit()
+        self.summary_edit.setReadOnly(True)
+        self.summary_edit.setMinimumHeight(120)
+        self.summary_edit.setPlaceholderText("Resumen por nodo (tareas, imagenes, tiempo, errores).")
+        output_layout.addRow("Logs:", self.logs_edit)
+        output_layout.addRow("Resumen por nodo:", self.summary_edit)
 
         # --- Fila de ejecución ---
         action_row = QHBoxLayout()
         self.execute_button = QPushButton("Ejecutar")
         self.execute_button.setObjectName("primaryButton")
         self.execute_button.clicked.connect(self.start_processing)
+        self.cancel_button = QPushButton("Cancelar")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel_processing)
 
         about_button = QPushButton("Acerca de")
         about_button.clicked.connect(self.show_about_dialog)
 
         action_row.addWidget(self.execute_button, 1)
-        action_row.addWidget(about_button)
+        action_row.addWidget(self.cancel_button)
 
         backend_hint = QLabel("El boton Ejecutar se bloquea mientras corre el backend en C.")
         backend_hint.setObjectName("mutedLabel")
@@ -464,6 +491,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
         layout.addWidget(transform_group)
         layout.addWidget(kernel_group)
+        layout.addWidget(mpi_group)
         layout.addWidget(output_group)
         layout.addWidget(backend_hint)
         layout.addStretch(1)
@@ -725,7 +753,22 @@ class MainWindow(QMainWindow):
             filters=selected_filters,
             kernel_gray=kernel_gray if "dg" in selected_filters else None,
             kernel_color=kernel_color if "dc" in selected_filters else None,
+            use_mpi=self.use_mpi_checkbox.isChecked(),
+            mpi_processes=self.mpi_processes_spin.value(),
+            mpi_hostfile=self.mpi_hostfile_edit.text().strip(),
+            mpi_oversubscribe=self.mpi_oversubscribe_checkbox.isChecked(),
+            mpi_map_by=self.mpi_map_by_edit.text().strip(),
+            mpi_shared_root=self.mpi_shared_root_edit.text().strip(),
+            mpi_auto_detect_nodes=self.mpi_auto_detect_checkbox.isChecked(),
         )
+
+        if request.use_mpi:
+            if not request.mpi_hostfile:
+                return ValidationResult(None, "En MPI, debes indicar un hostfile.")
+            if not request.mpi_map_by.strip():
+                return ValidationResult(None, "En MPI, el campo Map by no puede estar vacio.")
+            if not request.mpi_shared_root.strip().startswith("/"):
+                return ValidationResult(None, "En MPI, Shared root debe ser una ruta absoluta (ej: /shared/proyecto).")
         return ValidationResult(request)
 
     def _is_valid_kernel(self, value: int) -> bool:
@@ -776,13 +819,19 @@ class MainWindow(QMainWindow):
             return
 
         self.execute_button.setEnabled(False)
+        self.cancel_button.setEnabled(True)
         self.execution_time_edit.setText("Procesando...")
+        self.logs_edit.clear()
+        self.summary_edit.clear()
         self.statusBar().showMessage("Ejecutando backend...")
+        self.logs_edit.append(f"$ {' '.join([str(x) for x in self._preview_command(request)])}")
+        self.logs_edit.append("")
 
         self._thread = QThread(self)
         self._worker = ProcessingWorker(request)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
+        self._worker.log_line.connect(self.on_log_line)
         self._worker.finished.connect(self.on_processing_finished)
         self._worker.failed.connect(self.on_processing_failed)
         self._worker.finished.connect(self._thread.quit)
@@ -801,9 +850,21 @@ class MainWindow(QMainWindow):
                     Viene de BackendRunner.run() vía ProcessingWorker.finished.
         """
         self.execute_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
         self.execution_time_edit.setText(f"{result.execution_time:.3f} s")
         self.output_dir_edit.setText(result.output_dir)
         self.statusBar().showMessage("Procesamiento finalizado.")
+        logs = "\n".join([
+            f"$ {' '.join(result.command)}",
+            "",
+            "[STDOUT]",
+            result.stdout.strip(),
+            "",
+            "[STDERR]",
+            result.stderr.strip(),
+        ]).strip()
+        self.logs_edit.setPlainText(logs)
+        self.summary_edit.setPlainText(self._build_node_summary(result.stdout, result.execution_time))
 
         total_outputs = len(self.image_paths) * len(self.selected_filters())
         QMessageBox.information(
@@ -826,9 +887,184 @@ class MainWindow(QMainWindow):
                            Viene de ProcessingWorker.failed.
         """
         self.execute_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
         self.execution_time_edit.clear()
+        self.logs_edit.setPlainText(error_message)
+        self.summary_edit.clear()
         self.statusBar().showMessage("Fallo la ejecucion del backend.")
         QMessageBox.critical(self, "Error de procesamiento", error_message)
+
+    def on_log_line(self, line: str) -> None:
+        self.logs_edit.append(line)
+
+    def cancel_processing(self) -> None:
+        if self._worker is None:
+            return
+        self.statusBar().showMessage("Cancelando ejecucion...")
+        self._worker.cancel()
+
+    def _preview_command(self, request: ProcessingRequest) -> list[str]:
+        shared_root = request.mpi_shared_root.strip() if request.use_mpi else ""
+
+        def to_shared(path: str) -> str:
+            if not request.use_mpi:
+                return path
+            if path.startswith(shared_root + "/"):
+                return path
+            if path.startswith("/home/") and "/shared/" in path:
+                suffix = path[path.find("/shared/") + len("/shared/"):]
+                return f"{shared_root.rstrip('/')}/{suffix}"
+            if path.startswith(str(PROJECT_ROOT) + "/"):
+                suffix = path[len(str(PROJECT_ROOT)):].lstrip("/")
+                return f"{shared_root.rstrip('/')}/{suffix}"
+            if path.startswith(str(PROJECT_ROOT.parent) + "/"):
+                suffix = path[len(str(PROJECT_ROOT.parent)):].lstrip("/")
+                return f"{shared_root.rstrip('/')}/{suffix}"
+            if path.startswith("/"):
+                return path
+            return f"{shared_root.rstrip('/')}/{path.lstrip('./')}"
+
+        executable = f"{shared_root.rstrip('/')}/c_backend/bin/para_image_parra_mpi" if request.use_mpi else "c_backend/bin/para_image_parra"
+        backend = [
+            executable,
+            "--output",
+            to_shared(request.output_dir),
+            "--filters",
+            ",".join(request.filters),
+        ]
+        if request.kernel_gray is not None:
+            backend.extend(["--kernel-gray", str(request.kernel_gray)])
+        if request.kernel_color is not None:
+            backend.extend(["--kernel-color", str(request.kernel_color)])
+        backend.extend([to_shared(path) for path in request.image_paths])
+        if not request.use_mpi:
+            return backend
+
+        command = ["mpirun"]
+        if request.mpi_oversubscribe:
+            command.append("--oversubscribe")
+        command.extend(["-np", str(request.mpi_processes), "--hostfile", to_shared(request.mpi_hostfile)])
+        if request.mpi_map_by.strip():
+            command.extend(["--map-by", request.mpi_map_by.strip()])
+        return command + backend
+
+    def _build_node_summary(self, stdout: str, total_time: float) -> str:
+        dispatch_re = re.compile(r"^DISPATCH\s+source_rank=(\d+)\s+source_node=(\S+)\s+target_rank=(\d+)\s+target_node=(\S+)\s+image=(\S+)\s+filter=(\S+)\s+output=(\S+)")
+        image_assign_re = re.compile(r"^IMAGE_ASSIGN\s+rank=(\d+)\s+node=(\S+)\s+image=(\S+)\s+filters=(\S*)")
+        complete_re = re.compile(r"^COMPLETE\s+rank=(\d+)\s+node=(\S+)\s+(.+)$")
+        seconds_re = re.compile(r"seconds=([0-9]*\.?[0-9]+)")
+        image_re = re.compile(r"image=([^\t\s]+)")
+        filter_re = re.compile(r"filter=([^\t\s]+)")
+
+        by_node: dict[str, dict[str, object]] = {}
+
+        def get_node_entry(node: str) -> dict[str, object]:
+            if node not in by_node:
+                by_node[node] = {
+                    "rank": "?",
+                    "sent": 0,
+                    "assigned_images": 0,
+                    "completed": 0,
+                    "errors": 0,
+                    "seconds": 0.0,
+                    "images": set(),
+                    "filters": set(),
+                }
+            return by_node[node]
+
+        for raw_line in stdout.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            d = dispatch_re.match(line)
+            if d:
+                target_rank = d.group(3)
+                target_node = d.group(4)
+                image = Path(d.group(5)).name
+                flt = d.group(6)
+                entry = get_node_entry(target_node)
+                entry["rank"] = target_rank
+                entry["sent"] = int(entry["sent"]) + 1
+                cast_images = entry["images"]
+                cast_filters = entry["filters"]
+                if isinstance(cast_images, set):
+                    cast_images.add(image)
+                if isinstance(cast_filters, set):
+                    cast_filters.add(flt)
+                continue
+
+            ia = image_assign_re.match(line)
+            if ia:
+                rank = ia.group(1)
+                node = ia.group(2)
+                image = Path(ia.group(3)).name
+                filters_text = ia.group(4)
+                entry = get_node_entry(node)
+                entry["rank"] = rank
+                entry["assigned_images"] = int(entry["assigned_images"]) + 1
+                cast_images = entry["images"]
+                cast_filters = entry["filters"]
+                if isinstance(cast_images, set):
+                    cast_images.add(image)
+                if filters_text and isinstance(cast_filters, set):
+                    for flt in filters_text.split(","):
+                        if flt:
+                            cast_filters.add(flt)
+                continue
+
+            c = complete_re.match(line)
+            if c:
+                rank = c.group(1)
+                node = c.group(2)
+                payload = c.group(3)
+                entry = get_node_entry(node)
+                entry["rank"] = rank
+                entry["completed"] = int(entry["completed"]) + 1
+                if "\tERR\t" in payload or payload.startswith("ERR\t"):
+                    entry["errors"] = int(entry["errors"]) + 1
+
+                s = seconds_re.search(payload)
+                if s:
+                    entry["seconds"] = float(entry["seconds"]) + float(s.group(1))
+
+                im = image_re.search(payload)
+                flt = filter_re.search(payload)
+                cast_images = entry["images"]
+                cast_filters = entry["filters"]
+                if im and isinstance(cast_images, set):
+                    cast_images.add(Path(im.group(1)).name)
+                if flt and isinstance(cast_filters, set):
+                    cast_filters.add(flt.group(1))
+
+        if not by_node:
+            return "No se detectaron lineas DISPATCH/COMPLETE en la salida del backend."
+
+        lines: list[str] = []
+        lines.append(f"Tiempo total del cluster: {total_time:.3f} s")
+        lines.append("")
+
+        def rank_sort_value(value: object) -> int:
+            text = str(value)
+            return int(text) if text.isdigit() else 9999
+
+        ordered_nodes = sorted(by_node.items(), key=lambda item: (rank_sort_value(item[1]["rank"]), item[0]))
+        for node, stats in ordered_nodes:
+            images = sorted(stats["images"]) if isinstance(stats["images"], set) else []
+            filters = sorted(stats["filters"]) if isinstance(stats["filters"], set) else []
+            lines.append(f"Nodo {node} (rank {stats['rank']})")
+            lines.append(f"- Imagenes asignadas: {stats['assigned_images']}")
+            lines.append(f"- Tareas enviadas (legacy): {stats['sent']}")
+            lines.append(f"- Tareas completadas: {stats['completed']}")
+            lines.append(f"- Errores: {stats['errors']}")
+            lines.append(f"- Suma de tiempos de tareas: {float(stats['seconds']):.3f} s")
+            avg = float(stats['seconds']) / int(stats['completed']) if int(stats['completed']) > 0 else 0.0
+            lines.append(f"- Promedio por tarea: {avg:.3f} s")
+            lines.append(f"- Imagenes: {', '.join(images) if images else '(sin datos)'}")
+            lines.append(f"- Filtros: {', '.join(filters) if filters else '(sin datos)'}")
+            lines.append("")
+
+        return "\n".join(lines).strip()
 
     def _cleanup_thread(self) -> None:
         """
