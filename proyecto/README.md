@@ -19,7 +19,8 @@ Permitir que el usuario cargue hasta 10 imagenes BMP, seleccione uno o varios fi
 - `c_backend/include/bmp_filters_core.h`: filtros `vg`, `vc`, `dc`.
 - `c_backend/include/bmp_filters_extended.h`: filtros `hg`, `hc`, `dg` y utilidades.
 - `outputs/`: carpeta de salida por defecto.
-- `logo.webp`: logo mostrado en la GUI.
+- `logo_tec.png`: logo institucional mostrado en GUI.
+- `logo.webp`: recurso de logo adicional del proyecto.
 
 ## 3. Requisitos
 
@@ -56,8 +57,16 @@ gcc -fopenmp c_backend/src/bmp_processor.c -o c_backend/bin/para_image_parra
 
 Desde `proyecto/`:
 
+Windows:
+
 ```bash
 python gui/main.py
+```
+
+Linux/macOS:
+
+```bash
+python3 gui/main.py
 ```
 
 ## 6. Flujo UI -> Proceso
@@ -102,14 +111,19 @@ Ejemplos:
 
 ## 9. Documentacion de elementos graficos y acciones
 
-Esta seccion puede copiarse tal cual a la wiki.
+Esta seccion documenta formalmente cada elemento visual y el proceso que detona en la aplicacion.
 
 ### 9.1 Zona de carga
+
+- Elemento: `logo_tec.png` (arriba del `DropArea`)
+- Accion detonada: carga visual al construir el panel izquierdo.
+- Proceso asociado: branding institucional antes del bloque de arrastre.
 
 - Elemento: `DropArea`
 - Evento: `dropEvent`
 - Accion detonada: emite `files_dropped`
 - Proceso asociado: `add_images(paths)` valida BMP, elimina duplicados y respeta limite.
+- Nota visual: altura reducida para hacer mas compacto el bloque de carga.
 
 ### 9.2 Botones de imagenes
 
@@ -185,9 +199,9 @@ Esta seccion puede copiarse tal cual a la wiki.
 - Accion detonada: `show_about_dialog()`
 - Proceso asociado: muestra informacion general del proyecto.
 
-- Elemento: `logoLabel` (imagen `logo.webp`)
-- Accion detonada: carga visual al construir panel derecho.
-- Proceso asociado: branding de la interfaz.
+- Elemento: logo inferior en `AboutDialog` (imagen `logo_tec.png`)
+- Accion detonada: carga visual al abrir el modal `Acerca de`.
+- Proceso asociado: refuerzo de identidad institucional en el dialogo.
 
 ## 10. Validaciones implementadas
 
@@ -207,10 +221,23 @@ Esta seccion puede copiarse tal cual a la wiki.
   - `OUTPUT_DIR=<ruta>`
 - GUI: parsea tiempo y actualiza interfaz.
 
-## 12. Nota para wiki de la materia
+## 12. Resumen de entrega final
 
-Para cumplir la consigna de documentacion, usar como seccion de wiki:
+Esta documentacion deja trazado el flujo completo del sistema:
 
-- Seccion 6 (Flujo UI -> Proceso)
-- Seccion 9 (Elementos graficos y acciones)
-- Seccion 11 (Conexion tecnica GUI/backend)
+- Interaccion de usuario en GUI.
+- Validaciones y construccion de solicitud.
+- Invocacion del backend C por linea de comandos.
+- Procesamiento paralelo por filtros con OpenMP.
+- Retorno de resultados (`TOTAL_TIME`, `OUTPUT_DIR`) a la interfaz.
+
+## 13. Video demostrativo
+
+Espacio para evidencia audiovisual de ejecucion end-to-end:
+
+- Enlace: `[agregar enlace del video final]`
+- Debe incluir:
+  - Carga de imagenes BMP.
+  - Seleccion de filtros y kernels.
+  - Ejecucion y tiempo total.
+  - Evidencia de archivos generados en `outputs/`.

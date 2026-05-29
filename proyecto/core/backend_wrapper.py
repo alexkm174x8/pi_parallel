@@ -1,3 +1,22 @@
+﻿"""
+backend_wrapper.py 
+==============================================================
+Que hace:
+    - Recibe un ProcessingRequest que esta construido por MainWindow.
+    - Lo traduce a una línea de terminal para el ejecutable C.
+    - Lanza el proceso, captura su stdout y parsea el tiempo de ejecución.
+    - Devuelve un ProcessingResult o lanza BackendError si algo falla.
+
+Flujo de datos:
+    MainWindow.validate_request()
+        → ProcessingRequest
+        → BackendRunner.run(request)
+        → subprocess.run([ejecutable, --output, --filters, ...imágenes])
+        → stdout: "TOTAL_TIME=0.003241\nOUTPUT_DIR=/ruta"
+        → ProcessingResult(execution_time=0.003241, ...)
+        → MainWindow.on_processing_finished(result)
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,6 +30,10 @@ import subprocess
 import sys
 
 
+# ---------------------------------------------------------------------------
+# Rutas al ejecutable C
+# Se resuelven desde la ubicación de este archivo hacia la raíz del proyecto.
+# ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BACKEND_DIR = PROJECT_ROOT / "c_backend"
 BACKEND_BIN_DIR = BACKEND_DIR / "bin"
@@ -21,12 +44,59 @@ MPI_BACKEND_EXECUTABLE_FALLBACK = BACKEND_DIR / ("para_image_parra_mpi.exe" if s
 TIME_PATTERN = re.compile(r"TOTAL_TIME=([0-9]*\.?[0-9]+)")
 
 
-class BackendError(Exception):
-    pass
+# ---------------------------------------------------------------------------
+# Excepciones
+# ---------------------------------------------------------------------------
 
+class BackendError(Exception):
+    """
+    Se lanza cuando el backend C termina con código de error distinto de 0,
+    o cuando el stdout no contiene el campo TOTAL_TIME esperado.
+
+    MainWindow captura esta excepción en on_processing_failed() y la
+    muestra como QMessageBox.critical al usuario.
+    """
+
+
+# ---------------------------------------------------------------------------
+# Dataclasses de entrada y salida
+# ---------------------------------------------------------------------------
 
 @dataclass(slots=True)
 class ProcessingRequest:
+    """
+    Parámetros de una solicitud de procesamiento de imágenes.
+
+    Construido en MainWindow.validate_request() a partir de los valores
+    actuales de los widgets de la interfaz, y pasado a BackendRunner.run().
+
+    Atributos:
+        image_paths:  Lista de rutas absolutas a los archivos .bmp a procesar.
+                      Origen: self.image_paths en MainWindow (lista maestra).
+                      Ejemplo: ["/Users/sofia/foto1.bmp", "/Users/sofia/foto2.bmp"]
+
+        output_dir:   Ruta de la carpeta donde se guardarán las imágenes procesadas.
+                      Origen: output_dir_edit.text() en MainWindow.
+                      Ejemplo: "/Users/sofia/proyecto/outputs"
+
+        filters:      Lista de códigos de filtro seleccionados por el usuario.
+                      Origen: selected_filters() → filter_checkboxes activos.
+                      Valores posibles: "vg", "vc", "hg", "hc", "dg", "dc".
+                      Ejemplo: ["vg", "hg", "dc"]
+
+        kernel_gray:  Tamaño del kernel de desenfoque para el filtro "dg" (gris).
+                      Origen: kernel_gray_spin.value() en MainWindow.
+                      Solo se incluye si "dg" está en filters; si no, es None.
+                      Debe ser entero positivo e impar (validado antes de crear este objeto).
+
+        kernel_color: Tamaño del kernel de desenfoque para el filtro "dc" (color).
+                      Origen: kernel_color_spin.value() en MainWindow.
+                      Solo se incluye si "dc" está en filters; si no, es None.
+                      Debe ser entero positivo e impar.
+
+        executable:   Ruta al binario C compilado. Por defecto usa BACKEND_EXECUTABLE.
+                      Se puede sobrescribir para pruebas o rutas personalizadas.
+    """
     image_paths: list[str]
     output_dir: str
     filters: list[str]
@@ -44,6 +114,27 @@ class ProcessingRequest:
 
 @dataclass(slots=True)
 class ProcessingResult:
+    """
+    Resultado devuelto por BackendRunner.run() tras una ejecución exitosa.
+
+    Construido a partir del stdout del proceso C y entregado a
+    MainWindow.on_processing_finished() mediante la señal finished del worker.
+
+    Atributos:
+        execution_time: Tiempo total de procesamiento en segundos, extraído de
+                        la línea "TOTAL_TIME=<valor>" del stdout del backend C.
+                        Se muestra en execution_time_edit de la GUI.
+
+        output_dir:     Carpeta donde quedaron guardadas las imágenes procesadas.
+                        Extraída de "OUTPUT_DIR=<ruta>" del stdout del backend C.
+
+        stdout:         Salida estándar completa del proceso C (para diagnóstico).
+
+        stderr:         Salida de error del proceso C (útil para debugging).
+
+        command:        Lista con el comando exacto que se ejecutó vía subprocess.
+                        Útil para reproducir la ejecución manualmente en terminal.
+    """
     execution_time: float
     output_dir: str
     stdout: str
@@ -51,8 +142,26 @@ class ProcessingResult:
     command: list[str]
 
 
+# ---------------------------------------------------------------------------
+# Runner principal
+# ---------------------------------------------------------------------------
+
 class BackendRunner:
+    """
+    Traduce un ProcessingRequest en una llamada al ejecutable C y
+    devuelve un ProcessingResult.
+
+    Uso típico (desde ProcessingWorker en main_window.py):
+        runner = BackendRunner()
+        result = runner.run(request)
+    """
+
     def __init__(self, executable: Path | None = None) -> None:
+        """
+        Args:
+            executable: Ruta opcional al binario C. Si es None, usa
+                        BACKEND_EXECUTABLE (c_backend/bin/para_image_parra).
+        """
         self.executable = executable or BACKEND_EXECUTABLE
         self._process: subprocess.Popen[str] | None = None
 
@@ -115,12 +224,11 @@ class BackendRunner:
 
         backend_command = [
             str(executable),
-            "--output",
-            str(output_dir),
-            "--filters",
-            ",".join(request.filters),
+            "--output", str(output_dir),
+            "--filters", ",".join(request.filters),  # p.ej. "vg,hg,dc"
         ]
 
+        # Argumentos opcionales (solo si el filtro correspondiente está activo):
         if request.kernel_gray is not None:
             backend_command.extend(["--kernel-gray", str(request.kernel_gray)])
         if request.kernel_color is not None:
@@ -262,6 +370,8 @@ class BackendRunner:
         else:
             command = backend_command
 
+        # --- 4. Ejecutar el proceso C ---
+        # En Windows: CREATE_NO_WINDOW evita que aparezca una consola cmd.
         creationflags = 0
         if sys.platform.startswith("win"):
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -273,7 +383,7 @@ class BackendRunner:
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
-            errors="replace",
+            errors="replace",       # reemplaza bytes inválidos en lugar de fallar
             creationflags=creationflags,
         )
 
@@ -298,8 +408,11 @@ class BackendRunner:
 
         match = TIME_PATTERN.search(stdout_text)
         if not match:
-            raise BackendError("No se pudo leer el tiempo total desde la salida del backend.")
+            raise BackendError(
+                "No se pudo leer el tiempo total desde la salida del backend."
+            )
 
+        # --- 7. Devolver resultado ---
         return ProcessingResult(
             execution_time=float(match.group(1)),
             output_dir=str(output_dir),
