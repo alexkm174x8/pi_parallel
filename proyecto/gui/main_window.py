@@ -234,7 +234,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("BMP Parallel Studio")
-        self.resize(950, 650)
+        self.resize(1100, 650)
         self.setMinimumSize(760, 520)
 
         self._thread: QThread | None = None
@@ -265,15 +265,45 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         """
-        Construye el layout raíz horizontal con los dos paneles principales.
-        El panel izquierdo ocupa proporción 5, el derecho proporción 4.
+        Construye el layout raíz vertical con:
+        - Header superior: logo del tec y botón Acerca de
+        - Contenedor principal: los dos paneles (imágenes y opciones)
         """
         container = QWidget()
-        root = QHBoxLayout(container)
-        root.setContentsMargins(20, 20, 20, 20)
-        root.setSpacing(18)
-        root.addWidget(self._build_left_panel(), 5)
-        root.addWidget(self._build_right_panel(), 4)
+        main_layout = QVBoxLayout(container)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(14)
+
+        # Header con logo y botón Acerca de
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(14)
+        
+        logo_label = QLabel()
+        logo_label.setAlignment(Qt.AlignCenter)
+        logo_path = PROJECT_ROOT / "logo_tec.png"
+        if logo_path.exists():
+            pixmap = QPixmap(str(logo_path))
+            if not pixmap.isNull():
+                logo_label.setPixmap(pixmap.scaledToWidth(160, Qt.SmoothTransformation))
+        
+        header_layout.addWidget(logo_label)
+        header_layout.addStretch()
+        
+        about_button = QPushButton("Acerca de")
+        about_button.clicked.connect(self.show_about_dialog)
+        header_layout.addWidget(about_button)
+        
+        main_layout.addLayout(header_layout)
+        
+        # Contenedor con los dos paneles principales
+        panels_container = QWidget()
+        panels_layout = QHBoxLayout(panels_container)
+        panels_layout.setContentsMargins(0, 0, 0, 0)
+        panels_layout.setSpacing(12)
+        panels_layout.addWidget(self._build_left_panel(), 3)
+        panels_layout.addWidget(self._build_right_panel(), 5)
+        
+        main_layout.addWidget(panels_container)
 
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -311,14 +341,6 @@ class MainWindow(QMainWindow):
         subtitle = QLabel("Carga archivos BMP con arrastrar y soltar o con el selector.")
         subtitle.setObjectName("mutedLabel")
 
-        logo_label = QLabel()
-        logo_label.setAlignment(Qt.AlignCenter)
-        logo_path = PROJECT_ROOT / "logo_tec.png"
-        if logo_path.exists():
-            pixmap = QPixmap(str(logo_path))
-            if not pixmap.isNull():
-                logo_label.setPixmap(pixmap.scaledToWidth(260, Qt.SmoothTransformation))
-
         # DropArea: conecta su señal files_dropped a add_images()
         self.drop_area = DropArea()
         self.drop_area.files_dropped.connect(self.add_images)
@@ -342,6 +364,7 @@ class MainWindow(QMainWindow):
         self.image_list = QListWidget()
         self.image_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.image_list.setAlternatingRowColors(True)
+        self.image_list.setMaximumHeight(280)
 
         # Contador de imágenes
         self.loaded_count_label = QLabel("0 / 10 imagenes cargadas")
@@ -349,11 +372,11 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(title)
         layout.addWidget(subtitle)
-        layout.addWidget(logo_label)
-        layout.addWidget(self.drop_area, 4)
+        layout.addWidget(self.drop_area, 0)
         layout.addLayout(buttons)
-        layout.addWidget(self.image_list, 5)
+        layout.addWidget(self.image_list, 0)
         layout.addWidget(self.loaded_count_label)
+        layout.addStretch()
         return panel
 
     def _build_right_panel(self) -> QWidget:
@@ -478,9 +501,6 @@ class MainWindow(QMainWindow):
         self.cancel_button = QPushButton("Cancelar")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_processing)
-
-        about_button = QPushButton("Acerca de")
-        about_button.clicked.connect(self.show_about_dialog)
 
         action_row.addWidget(self.execute_button, 1)
         action_row.addWidget(self.cancel_button)

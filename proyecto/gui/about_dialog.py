@@ -39,7 +39,7 @@ class AboutDialog(QDialog):
         self.setObjectName("aboutDialog")       # referenciado en styles.qss
         self.setWindowTitle("Acerca de:")
         self.setModal(True)                     # bloquea interacción con la ventana padre
-        self.resize(460, 380)
+        self.resize(380, 280)
 
         # --- Título ---
         title = QLabel("Acerca de")
@@ -50,7 +50,7 @@ class AboutDialog(QDialog):
             "TC3003B\n"
             "Tecnológico de Monterrey\n"
             "Campus Puebla\n"
-            "Abril 2026\n"
+            "Junio 2026\n"
             "Equipo:\n"
             "Estefanía Antonio Villaseca A01736897\n"
             "Miranda Eugenia Colorado Arróniz A01737023\n"
@@ -61,15 +61,6 @@ class AboutDialog(QDialog):
         body.setWordWrap(True)
         body.setTextFormat(Qt.PlainText)        # evita interpretación HTML accidental
 
-        # --- Logo institucional inferior ---
-        logo_label = QLabel()
-        logo_label.setAlignment(Qt.AlignCenter)
-        logo_path = Path(__file__).resolve().parent.parent / "logo_tec.png"
-        if logo_path.exists():
-            pixmap = QPixmap(str(logo_path))
-            if not pixmap.isNull():
-                logo_label.setPixmap(pixmap.scaledToWidth(260, Qt.SmoothTransformation))
-
         # --- Botón de cierre ---
         buttons = QDialogButtonBox(QDialogButtonBox.Ok)
         buttons.setObjectName("aboutButtons")
@@ -79,6 +70,5 @@ class AboutDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(title)
         layout.addWidget(body)
-        layout.addWidget(logo_label)
         layout.addStretch(1)                    # empuja el botón hacia abajo
         layout.addWidget(buttons)
